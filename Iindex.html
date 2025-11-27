@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tablón de Comentarios Público</title>
+    <!-- Carga de Tailwind CSS para el diseño moderno -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 flex flex-col items-center min-h-screen p-4">
+
+    <!-- Contenedor Principal -->
+    <div class="w-full max-w-2xl bg-white p-6 md:p-8 rounded-2xl shadow-xl border-t-4 border-indigo-500 mb-8">
+        
+        <header class="text-center mb-6">
+            <h1 class="text-3xl font-extrabold text-gray-900 mb-2">
+                💬 Tablón de Comentarios Público
+            </h1>
+            <p class="text-gray-600">Deja tu opinión o mensaje. ¡Todos lo verán en tiempo real!</p>
+        </header>
+
+        <!-- Formulario para Agregar Comentario -->
+        <form id="commentForm" class="space-y-4">
+            <!-- Nuevo Campo de Nombre/Alias -->
+            <input type="text" id="nameInput" placeholder="Tu Nombre o Alias (Opcional)"
+                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm">
+            
+            <textarea id="commentInput" rows="3" placeholder="Escribe tu comentario aquí..."
+                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 resize-none shadow-sm" required></textarea>
+            
+            <button type="submit" id="submitBtn"
+                class="w-full px-4 py-2 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150 disabled:bg-indigo-400">
+                Publicar Comentario
+            </button>
+            <p id="authStatus" class="text-center text-sm text-yellow-600 font-medium"></p>
+        </form>
+    </div>
+
+    <!-- Lista de Comentarios -->
+    <div class="w-full max-w-2xl">
+        <h2 class="text-xl font-bold text-gray-800 mb-4">Comentarios Recientes</h2>
+        <div id="commentsList" class="space-y-4">
+            <p id="loadingMsg" class="text-center text-gray-500">Cargando comentarios...</p>
+        </div>
+    </div>
+
+    <!-- Script de Firebase y Lógica -->
+    <script type="module">
+        // --- 1. IMPORTACIONES DE FIREBASE ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- 2. VARIABLES GLOBALES DEL ENTORNO (MANDATORIAS) ---
+        // Estas variables son proporcionadas por el entorno de Canvas.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId = null;
+        let isAuthReady = false;
+
+        // --- 3. REFERENCIAS DEL DOM ---
+        const commentForm = document.getElementById('commentForm');
+        const nameInput = document.getElementById('nameInput'); // Nuevo
+        const commentInput = document.getElementById('commentInput');
+        const submitBtn = document.getElementById('submitBtn');
+        const commentsList = document.getElementById('commentsList');
+        const loadingMsg = document.getElementById('loadingMsg');
+        const authStatus = document.getElementById('authStatus');
+
+        // --- 4. FUNCIÓN DE INICIALIZACIÓN Y AUTENTICACIÓN ---
+        async function initializeFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                authStatus.textContent = 'Autenticando...';
+                submitBtn.disabled = true;
+
+                // Intentar iniciar sesión con el token provisto o de forma anónima
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        submitBtn.disabled = false;
+                        authStatus.textContent = `Sesión iniciada. Tu ID de usuario: ${userId}`;
+                        // Iniciar la carga de comentarios solo después de la autenticación
+                        setupCommentListener(); 
+                    } else {
+                        isAuthReady = true;
+                        submitBtn.disabled = true;
+                        authStatus.textContent = 'No se pudo iniciar sesión. La app está deshabilitada.';
+                        loadingMsg.textContent = 'Error: Falló la autenticación.';
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error al inicializar o autenticar Firebase:", error);
+                authStatus.textContent = 'ERROR de Configuración de Firebase.';
+                loadingMsg.textContent = 'Error crítico al iniciar la aplicación.';
+            }
+        }
+
+        // --- 5. FUNCIÓN PARA ENVIAR COMENTARIO ---
+        commentForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            if (!isAuthReady || !userId) {
+                authStatus.textContent = "Error: La autenticación no está lista. Inténtalo de nuevo.";
+                return;
+            }
+
+            const commentText = commentInput.value.trim();
+            const nameText = nameInput.value.trim() || 'Anónimo'; // Usar 'Anónimo' si está vacío
+            
+            if (commentText === "") return;
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Publicando...';
+
+            try {
+                // RUTA PÚBLICA MANDATORIA: /artifacts/{appId}/public/data/{nombre_coleccion}
+                const commentsCollectionRef = collection(db, `artifacts/${appId}/public/data/comments`);
+
+                await addDoc(commentsCollectionRef, {
+                    text: commentText,
+                    name: nameText, // Guardamos el nombre
+                    authorId: userId,
+                    timestamp: serverTimestamp() // Usa el timestamp del servidor para ordenar
+                });
+
+                commentInput.value = ''; // Limpiar el input
+                // nameInput.value = ''; // No limpiamos el nombre para facilitar múltiples envíos
+            } catch (error) {
+                console.error("Error al añadir el documento:", error);
+                // NOTA: Usamos console.error en lugar de alert()
+                authStatus.textContent = "Error al publicar el comentario. Revisa la consola.";
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Publicar Comentario';
+            }
+        });
+
+        // --- 6. FUNCIÓN PARA ESCUCHAR Y RENDERIZAR COMENTARIOS (EN TIEMPO REAL) ---
+        function setupCommentListener() {
+            // Aseguramos que la autenticación está lista antes de consultar Firestore
+            if (!isAuthReady || !userId) return; 
+
+            // RUTA PÚBLICA
+            const commentsCollectionRef = collection(db, `artifacts/${appId}/public/data/comments`);
+            
+            // Usamos un query sin orderBy para evitar errores de índice y ordenamos in-memory.
+            const q = query(commentsCollectionRef);
+
+            // onSnapshot proporciona actualizaciones en tiempo real
+            onSnapshot(q, (snapshot) => {
+                const comments = [];
+                snapshot.forEach(doc => {
+                    comments.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Ordenación en memoria por timestamp descendente
+                comments.sort((a, b) => {
+                    // Maneja los casos donde timestamp aún es nulo (pendiente del servidor)
+                    const timeA = a.timestamp?.toMillis() || 0;
+                    const timeB = b.timestamp?.toMillis() || 0;
+                    return timeB - timeA; // Más reciente primero
+                });
+
+                renderComments(comments);
+            }, (error) => {
+                console.error("Error al escuchar comentarios:", error);
+                commentsList.innerHTML = `<p class="text-center text-red-600">Error al cargar la lista: ${error.message}</p>`;
+            });
+        }
+
+        // --- 7. FUNCIÓN PARA RENDERIZAR AL DOM ---
+        function renderComments(comments) {
+            commentsList.innerHTML = '';
+            loadingMsg.classList.add('hidden'); // Ocultar el mensaje de carga
+
+            if (comments.length === 0) {
+                commentsList.innerHTML = '<p class="text-center text-gray-500 bg-gray-100 p-4 rounded-lg">Aún no hay comentarios. ¡Sé el primero!</p>';
+                return;
+            }
+
+            comments.forEach(comment => {
+                const commentElement = document.createElement('div');
+                commentElement.className = 'p-4 bg-white shadow-lg rounded-xl border border-gray-100';
+                
+                const date = comment.timestamp 
+                    ? comment.timestamp.toDate().toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' })
+                    : 'Publicando...';
+
+                commentElement.innerHTML = `
+                    <p class="text-gray-700 mb-2">${comment.text}</p>
+                    <div class="flex justify-between items-center text-xs text-gray-400 border-t pt-2 mt-2">
+                        <!-- Mostramos el nombre o alias -->
+                        <span class="font-semibold text-gray-600">
+                            ${comment.name || 'Anónimo'}
+                        </span>
+                        <!-- ID de usuario visible para la empresa -->
+                        <span class="font-mono bg-gray-100 px-2 py-1 rounded-full truncate max-w-[40%] md:max-w-full" title="ID de Usuario">
+                            ID: ${comment.authorId}
+                        </span>
+                        <span>${date}</span>
+                    </div>
+                `;
+                commentsList.appendChild(commentElement);
+            });
+        }
+
+        // --- 8. INICIO DE LA APLICACIÓN ---
+        initializeFirebase();
+    </script>
+</body>
+</html>
